@@ -1,0 +1,248 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Custom Resource to provision an SNS iOS PlatformApplication (APNS or APNS_SANDBOX) via token-based (.p8) auth.
+
+Parameters:
+  AppName:
+    Type: String
+    AllowedPattern: "^[a-zA-Z0-9-]+$"
+    Description: Short app/system name (e.g., garage assist)
+
+  PlatformType:
+    Type: String
+    AllowedValues: [APNS, APNS_SANDBOX]
+    Default: APNS_SANDBOX
+    Description: APNS (prod) or APNS_SANDBOX (dev). Default SANDBOX.
+
+  AppleTeamID:
+    Type: String
+    Description: Apple Developer Team ID (e.g., ABCDE12345)
+
+  AppleKeyID:
+    Type: String
+    Description: Apple Key ID for the .p8 signing key (e.g., 1A2BC3D4E5)
+
+  AppleBundleID:
+    Type: String
+    Description: iOS bundle identifier (e.g., com.garag.assist)
+
+  AppleTokenPrivateKey:
+    Type: String
+    NoEcho: true
+    ##  base64 -i /path/to/AuthKey_<KEYID>.p8 to get the contents as a string that works in AWS console
+    Description: Full contents of the .p8 private key (AuthKey_<KEYID>.p8)
+
+Resources:
+
+  SnsPlatformAppFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: lambda-logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+        - PolicyName: sns-platform-app-admin
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:CreatePlatformApplication
+                  - sns:SetPlatformApplicationAttributes
+                  - sns:GetPlatformApplicationAttributes
+                  - sns:DeletePlatformApplication
+                Resource: "*"
+
+  SnsPlatformAppFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !GetAtt SnsPlatformAppFunctionRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      Handler: index.handler
+      Description: Creates/updates/deletes an SNS PlatformApplication for APNS/APNS_SANDBOX (.p8 token auth).
+      Code:
+        ZipFile: |
+          import json, logging, boto3, os, urllib.request, base64
+          from botocore.exceptions import ClientError
+
+          logger = logging.getLogger(__name__)
+          logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
+
+          sns = boto3.client("sns")
+
+          def _send_response(event, context, status, data=None, physical_id=None, reason=None):
+            """Reply to CloudFormation custom resource pre-signed URL."""
+            try:
+              response_body = {
+                "Status": status,
+                "Reason": reason or f"See CloudWatch Log Stream: {context.log_stream_name}",
+                "PhysicalResourceId": physical_id or context.log_stream_name,
+                "StackId": event["StackId"],
+                "RequestId": event["RequestId"],
+                "LogicalResourceId": event["LogicalResourceId"],
+                "NoEcho": True,
+                "Data": data or {}
+              }
+              body = json.dumps(response_body).encode("utf-8")
+              req = urllib.request.Request(
+                event["ResponseURL"], data=body, method="PUT",
+                headers={"content-type": "", "content-length": str(len(body))}
+              )
+              with urllib.request.urlopen(req) as resp:
+                logger.info(f"CFN response status: {resp.status}")
+            except Exception as e:
+              logger.exception("Failed to send CFN response")
+
+          def _normalize_p8(raw: str) -> str:
+            """
+            Make console-pasted .p8 safe:
+             - Accept full PEM as-is
+             - Accept one-line Base64 of the PEM
+             - Accept text where newlines were replaced with literal '\\n'
+            Ensure we end up with a valid PEM (with headers) and LF newlines.
+            """
+            if not raw:
+              raise ValueError("AppleTokenPrivateKey is required")
+
+            s = str(raw).strip()
+
+            # Handle users pasting literal '\n' (common in GUIs)
+            if "\\n" in s and "-----BEGIN" not in s:
+              s = s.replace("\\n", "\n")
+
+            # Normalize line endings
+            s = s.replace("\r\n", "\n").strip()
+
+            # If there's no PEM header, try Base64 decode of the whole string
+            if "-----BEGIN" not in s:
+              try:
+                decoded = base64.b64decode(s, validate=False).decode("utf-8", "ignore").strip()
+                if "-----BEGIN" in decoded and "-----END" in decoded:
+                  s = decoded
+              except Exception:
+                # Not base64; fall through and fail on header check
+                pass
+
+            # Final validation
+            if "-----BEGIN" not in s or "-----END" not in s:
+              raise ValueError("AppleTokenPrivateKey must be the full PEM (BEGIN/END) or a Base64 of it.")
+
+            # Tighten whitespace: remove empty lines, ensure trailing newline
+            lines = [ln.strip() for ln in s.split("\n") if ln.strip() != ""]
+            return "\n".join(lines) + "\n"
+
+          def handler(event, context):
+            # Avoid logging secrets; redact private key length only
+            safe_event = {k: v for k, v in event.items() if k not in ("ResourceProperties", "ResponseURL")}
+            logger.info(f"RequestType={event.get('RequestType')} EventKeys={list(safe_event.keys())}")
+
+            req_type = event["RequestType"]
+            props = event["ResourceProperties"]
+
+            app_name = f"{props['AppName']}-apns"            # fixed name per your spec
+            platform = props["PlatformType"]                 # APNS or APNS_SANDBOX
+
+            try:
+              p8 = _normalize_p8(props.get("AppleTokenPrivateKey", ""))
+
+              desired = {
+                "PlatformPrincipal": props["AppleKeyID"],   # Key ID
+                "PlatformCredential": p8,                   # normalized PEM
+                "ApplePlatformTeamID": props["AppleTeamID"],
+                "ApplePlatformBundleID": props["AppleBundleID"],
+              }
+
+              if req_type == "Create":
+                resp = sns.create_platform_application(
+                  Name=app_name, Platform=platform, Attributes=desired
+                )
+                arn = resp["PlatformApplicationArn"]
+                data = {"PlatformApplicationArn": arn, "Name": app_name, "Platform": platform}
+                _send_response(event, context, "SUCCESS", data=data, physical_id=arn)
+                return
+
+              if req_type == "Update":
+                old_props = event.get("OldResourceProperties") or {}
+                physical  = event.get("PhysicalResourceId")
+
+                # If platform changed, replace resource (immutable in practice)
+                if old_props.get("PlatformType") != platform:
+                  resp = sns.create_platform_application(
+                    Name=app_name, Platform=platform, Attributes=desired
+                  )
+                  new_arn = resp["PlatformApplicationArn"]
+                  # best-effort delete of old
+                  try:
+                    if physical and physical != new_arn:
+                      sns.delete_platform_application(PlatformApplicationArn=physical)
+                  except ClientError as e:
+                    logger.warning(f"Delete old platform app failed: {e}")
+                  data = {"PlatformApplicationArn": new_arn, "Name": app_name, "Platform": platform}
+                  _send_response(event, context, "SUCCESS", data=data, physical_id=new_arn)
+                  return
+
+                # Same platform: update attributes in-place
+                if not physical:
+                  raise ValueError("Missing PhysicalResourceId on Update")
+                for k, v in desired.items():
+                  sns.set_platform_application_attributes(
+                    PlatformApplicationArn=physical,
+                    Attributes={k: v}
+                  )
+                data = {"PlatformApplicationArn": physical, "Name": app_name, "Platform": platform}
+                _send_response(event, context, "SUCCESS", data=data, physical_id=physical)
+                return
+
+              if req_type == "Delete":
+                arn = event.get("PhysicalResourceId")
+                if arn and arn.startswith("arn:aws:sns:"):
+                  try:
+                    sns.delete_platform_application(PlatformApplicationArn=arn)
+                  except ClientError as e:
+                    # Treat already-deleted as success
+                    code = e.response.get("Error", {}).get("Code")
+                    if code not in ("NotFound", "InvalidParameter"):
+                      raise
+                _send_response(event, context, "SUCCESS", data={"Deleted": True}, physical_id=arn or "deleted")
+                return
+
+            except ClientError as e:
+              reason = e.response.get("Error", {}).get("Message", str(e))
+              logger.exception(f"AWS error: {reason}")
+              _send_response(event, context, "FAILED", reason=reason)
+            except Exception as e:
+              logger.exception("Operation failed")
+              _send_response(event, context, "FAILED", reason=str(e))
+
+  SnsPlatformApplication:
+    Type: Custom::SnsPlatformApplication
+    Properties:
+      ServiceToken: !GetAtt SnsPlatformAppFunction.Arn
+      AppName: !Ref AppName
+      PlatformType: !Ref PlatformType
+      AppleTeamID: !Ref AppleTeamID
+      AppleKeyID: !Ref AppleKeyID
+      AppleBundleID: !Ref AppleBundleID
+      AppleTokenPrivateKey: !Ref AppleTokenPrivateKey
+
+Outputs:
+  PlatformApplicationArn:
+    Description: ARN of the created SNS PlatformApplication
+    Value: !GetAtt SnsPlatformApplication.PlatformApplicationArn
+    Export:
+      Name: !Sub "${AWS::StackName}-PlatformApplicationArn"
+

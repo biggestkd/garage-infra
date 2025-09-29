@@ -1,0 +1,168 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "GitHub Actions OIDC role (gha-role) for CFN deploys, ECR pushes, and Lambda image updates"
+
+Parameters:
+
+  GitHubOrg:
+    Type: String
+    Description: "GitHub org/user, e.g., biggestkd"
+
+  GitHubRepo:
+    Type: String
+    Description: "GitHub repo name, e.g., garage-infra"
+
+  # Choose how strict you want to be. Use an exact ref like 'refs/heads/main'
+  # or a wildcard like 'refs/heads/*' to allow any branch.
+  GitHubRef:
+    Type: String
+    Default: "refs/heads/main"
+    Description: "Git ref to allow (e.g., refs/heads/main or refs/tags/* or refs/heads/*)"
+
+  # Optional: CFN execution role your stacks will use (recommended).
+  # If provided, gha-role will be able to PassRole ONLY to this role.
+  CfnExecutionRoleArn:
+    Type: String
+    Default: ""
+    Description: "(Optional) ARN of CloudFormation execution role used by stacks"
+
+  # Optional: Artifact bucket used by 'aws cloudformation package'
+  ArtifactBucketArn:
+    Type: String
+    Default: ""
+    Description: "(Optional) ARN of S3 artifact bucket (arn:aws:s3:::bucket)"
+
+  # Whether to create the GitHub OIDC provider in this account
+  CreateGitHubOIDCProvider:
+    Type: String
+    AllowedValues: [true, false]
+    Default: false
+
+  RoleName:
+    Type: String
+    Default: gha-role
+    Description: "Name of the role GitHub will assume in THIS account"
+
+  # Optional: Restrict Lambda updates to a name prefix
+  LambdaFunctionNamePrefix:
+    Type: String
+    Default: ""
+    Description: "(Optional) Restrict lambda:* to functions starting with this prefix; leave blank for all"
+
+Conditions:
+  CreateOIDC: !Equals [!Ref CreateGitHubOIDCProvider, "true"]
+  HasArtifacts: !Not [!Equals [!Ref ArtifactBucketArn, ""]]
+  HasCfnExecRole: !Not [!Equals [!Ref CfnExecutionRoleArn, ""]]
+  RestrictLambda: !Not [!Equals [!Ref LambdaFunctionNamePrefix, ""]]
+
+Resources:
+  # Create once per account (set CreateGitHubOIDCProvider=true if not present)
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOIDC
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [ sts.amazonaws.com ]
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  GitHubActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateOIDC
+                - !Ref GitHubOIDCProvider
+                - !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:${GitHubRef}"
+      Description: "Role assumed directly by GitHub Actions (OIDC) from repo ${GitHubOrg}/${GitHubRepo}"
+      Policies:
+        - PolicyName: gha-cfn-ecr-lambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # --- CloudFormation core operations in THIS account ---
+              - Sid: CloudFormationCore
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:Describe*
+                  - cloudformation:GetTemplate*
+                  - cloudformation:List*
+                Resource: "*"
+
+              # (Optional) Pass ONLY the designated CFN execution role
+              - Sid: PassOnlyCfnExecRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !If [HasCfnExecRole, !Ref CfnExecutionRoleArn, !Ref "AWS::NoValue"]
+
+              # --- S3: artifacts bucket (optional) ---
+              - Sid: ArtifactBucketAccess
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource: !If
+                  - HasArtifacts
+                  - [ !Ref ArtifactBucketArn, !Sub "${ArtifactBucketArn}/*" ]
+                  - [ !Ref "AWS::NoValue" ]
+
+              # --- ECR: push/pull to ANY repo in THIS account ---
+              - Sid: EcrRepoScoped
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                  - ecr:BatchGetImage
+                  - ecr:DescribeImages
+                  - ecr:ListImages
+                Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/*
+
+              # ECR account-level actions
+              - Sid: EcrAccountWide
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:DescribeRepositories
+                  - ecr:CreateRepository
+                Resource: "*"
+
+              # --- Lambda: update container image code (optionally scoped by name prefix) ---
+              - Sid: LambdaUpdate
+                Effect: Allow
+                Action:
+                  - lambda:UpdateFunctionCode
+                  - lambda:PublishVersion
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                  - lambda:UpdateAlias
+                  - lambda:CreateAlias
+                Resource: !If
+                  - RestrictLambda
+                  - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaFunctionNamePrefix}*
+                  - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*
+
+Outputs:
+  GitHubActionsRoleArn:
+    Description: "Role ARN that GitHub should assume in this account"
+    Value: !GetAtt GitHubActionsRole.Arn

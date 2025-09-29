@@ -1,0 +1,38 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: API Lambda execution role
+
+Parameters:
+  PoliciesExportPrefix:
+    Type: String
+    Description: "Stack name of iam-policies to import from, e.g., api-iam-policies"
+  RoleName:
+    Type: String
+    Default: api-lambda-exec-role
+
+Resources:
+  ApiLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !ImportValue
+          Fn::Sub: "${PoliciesExportPrefix}-CwLogsBasicLambdaPolicyArn"
+        - !ImportValue
+          Fn::Sub: "${PoliciesExportPrefix}-S3AccessPolicyArn"
+        - !ImportValue
+          Fn::Sub: "${PoliciesExportPrefix}-SNSAccessPolicyArn"
+        - !ImportValue
+          Fn::Sub: "${PoliciesExportPrefix}-TextractAccessPolicyArn"
+        - !ImportValue
+          Fn::Sub: "${PoliciesExportPrefix}-BedrockInvokePolicyArn"
+
+Outputs:
+  RoleArn:
+    Value: !GetAtt ApiLambdaExecutionRole.Arn

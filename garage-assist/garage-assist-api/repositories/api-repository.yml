@@ -1,0 +1,58 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: ECR repository for application container images.
+
+Parameters:
+  AppName:
+    Type: String
+    Default: app
+    Description: Application name prefix for the repository
+
+Resources:
+  AppRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${AppName}
+      ImageScanningConfiguration:
+        ScanOnPush: false # Enable to check images for CVEs - also increases costs
+      ImageTagMutability: IMMUTABLE # Disable image overwrites with latest tag
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire untagged images after 7 days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Keep only last 2 images overall",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 2
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+
+Outputs:
+  RepositoryName:
+    Description: Name of the ECR repository
+    Value: !Ref AppRepository
+  RepositoryUri:
+    Description: URI of the ECR repository (push/pull images with this)
+    Value: !GetAtt AppRepository.RepositoryUri
+  Arn:
+    Description: ARN of the ECR repository
+    Value: !GetAtt AppRepository.Arn

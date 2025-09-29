@@ -1,14 +1,14 @@
-# Starter Infrastructure Repository
+# Garage Infrastructure
 
-This repository provides a **starter template** for managing infrastructure as code (IaC) using **AWS CloudFormation**.  
-It is designed to be the baseline structure for new infrastructure projects, ensuring consistency, modularity, and ease of deployment across apps and systems.
+This repository provides **templates** for managing infrastructure as code (IaC) using **AWS CloudFormation**.  
+
+It is designed to be the baseline structure for new infrastructure projects, ensuring consistency, modularity, and ease of deployment across apps and accounts.
 
 ---
 
 ## 📂 Repository Structure
 
-At the top level, each folder represents an **app/system**.  
-Inside each app/system folder, there are **projects**, and inside projects, there are **resource definitions** (e.g., S3 buckets, IAM roles, policies) with optional environment specifiers.
+At the top level, each folder represents an **app/system**. Inside each app/system folder, there are **projects**, and inside projects, there are **resource definitions** (e.g., S3 buckets, IAM roles, policies) with optional environment specifiers.
 
 ```
 starter-infra-repo/

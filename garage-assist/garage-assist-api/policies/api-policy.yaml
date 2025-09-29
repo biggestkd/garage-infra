@@ -1,0 +1,126 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: IAM policies for API
+
+Parameters:
+  AppBucketArn:
+    Type: String
+    Description: "App bucket ARN"
+
+  PushNotificationTopicArn:
+    Type: String
+    Description: "SNS Topic ARN to publish push notifications"
+
+Resources:
+  
+  S3AccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: "Grants access to App Bucket (supports presigned URL generation)"
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ListBucket
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !Ref AppBucketArn
+
+          - Sid: ObjectReadWrite
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource: !Sub "${AppBucketArn}/*"
+
+          - Sid: MultipartUploads
+            Effect: Allow
+            Action:
+              - s3:AbortMultipartUpload
+              - s3:ListMultipartUploadParts
+              - s3:CreateMultipartUpload
+            Resource: !Sub "${AppBucketArn}/*"
+
+  SNSAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: "Grants access to push notification SNS topic"
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PublishSpecificTopic
+            Effect: Allow
+            Action: sns:Publish
+            Resource: !Ref PushNotificationTopicArn
+
+  TextractAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: "Grants access to textract expense analyzer"
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ExpenseAPI
+            Effect: Allow
+            Action:
+              - textract:AnalyzeExpense
+            Resource: "*"
+
+  BedrockInvokePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: "Grants access to invoke accessible bedrock models"
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: InvokeAvailableModel
+            Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+            Resource: "*"
+
+  CwLogsBasicLambdaPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: "Grants access to cloudwatch for storing logs"
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*
+
+Outputs:
+
+  S3AccessPolicyArn:
+    Value: !Ref S3AccessPolicy
+    Description: ARN for S3 Access Policy
+    Export:
+      Name: !Sub ${AWS::StackName}-S3AccessPolicyArn
+
+  SNSAccessPolicyArn:
+    Value: !Ref SNSAccessPolicy
+    Description: ARN for SNS Access Policy
+    Export:
+      Name: !Sub ${AWS::StackName}-SNSAccessPolicyArn
+
+  TextractAccessPolicyArn:
+    Value: !Ref TextractAccessPolicy
+    Description: ARN for Textract Access Policy
+    Export:
+      Name: !Sub ${AWS::StackName}-TextractAccessPolicyArn
+
+  BedrockInvokePolicyArn:
+    Value: !Ref BedrockInvokePolicy
+    Description: ARN for Bedrock Access Policy
+    Export:
+      Name: !Sub ${AWS::StackName}-BedrockInvokePolicyArn
+
+  CwLogsBasicLambdaPolicyArn:
+    Value: !Ref CwLogsBasicLambdaPolicy
+    Description: ARN for CloudWatch Access Policy
+    Export:
+      Name: !Sub ${AWS::StackName}-CwLogsBasicLambdaPolicyArn
