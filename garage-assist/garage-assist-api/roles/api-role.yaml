@@ -7,7 +7,7 @@ Parameters:
     Description: "Stack name of iam-policies to import from, e.g., api-iam-policies"
   RoleName:
     Type: String
-    Default: api-lambda-exec-role
+    Default: garage-assist-api-exec-role
 
 Resources:
   ApiLambdaExecutionRole:

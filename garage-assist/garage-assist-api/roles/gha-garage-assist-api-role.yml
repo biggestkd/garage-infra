@@ -2,129 +2,69 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: "GitHub Actions OIDC role (gha-role) for CFN deploys, ECR pushes, and Lambda image updates"
 
 Parameters:
-
   GitHubOrg:
     Type: String
     Description: "GitHub org/user, e.g., biggestkd"
 
   GitHubRepo:
     Type: String
-    Description: "GitHub repo name, e.g., garage-infra"
+    Default: "garage-assist-api"
+    Description: "GitHub repo name, e.g., garage-assist-api"
 
-  # Choose how strict you want to be. Use an exact ref like 'refs/heads/main'
-  # or a wildcard like 'refs/heads/*' to allow any branch.
-  GitHubRef:
+  GitHubBranch:
     Type: String
-    Default: "refs/heads/main"
-    Description: "Git ref to allow (e.g., refs/heads/main or refs/tags/* or refs/heads/*)"
-
-  # Optional: CFN execution role your stacks will use (recommended).
-  # If provided, gha-role will be able to PassRole ONLY to this role.
-  CfnExecutionRoleArn:
-    Type: String
-    Default: ""
-    Description: "(Optional) ARN of CloudFormation execution role used by stacks"
-
-  # Optional: Artifact bucket used by 'aws cloudformation package'
-  ArtifactBucketArn:
-    Type: String
-    Default: ""
-    Description: "(Optional) ARN of S3 artifact bucket (arn:aws:s3:::bucket)"
-
-  # Whether to create the GitHub OIDC provider in this account
-  CreateGitHubOIDCProvider:
-    Type: String
-    AllowedValues: [true, false]
-    Default: false
+    Default: "refs/heads/dev"
+    Description: "Git ref to allow (e.g., refs/heads/dev | refs/heads/main | refs/heads/* | refs/tags/*)"
 
   RoleName:
     Type: String
-    Default: gha-role
-    Description: "Name of the role GitHub will assume in THIS account"
+    Default: garage-assist-api-gha-role
+    Description: "Name of the role GitHub Action will assume in Garage Assist API repo"
 
-  # Optional: Restrict Lambda updates to a name prefix
-  LambdaFunctionNamePrefix:
+  LambdaExecutionRoleArn:
     Type: String
-    Default: ""
-    Description: "(Optional) Restrict lambda:* to functions starting with this prefix; leave blank for all"
-
-Conditions:
-  CreateOIDC: !Equals [!Ref CreateGitHubOIDCProvider, "true"]
-  HasArtifacts: !Not [!Equals [!Ref ArtifactBucketArn, ""]]
-  HasCfnExecRole: !Not [!Equals [!Ref CfnExecutionRoleArn, ""]]
-  RestrictLambda: !Not [!Equals [!Ref LambdaFunctionNamePrefix, ""]]
+    Description: "ARN of the IAM role to be used as the Lambda execution role"
 
 Resources:
-  # Create once per account (set CreateGitHubOIDCProvider=true if not present)
+
   GitHubOIDCProvider:
     Type: AWS::IAM::OIDCProvider
-    Condition: CreateOIDC
     Properties:
       Url: https://token.actions.githubusercontent.com
       ClientIdList: [ sts.amazonaws.com ]
-      ThumbprintList:
-        - 6938fd4d98bab03faadb97b34396831e3780aea1
 
   GitHubActionsRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Ref RoleName
+      Description: "Role assumed directly by GitHub Actions (OIDC) from repo ${GitHubOrg}/${GitHubRepo}/${GitHubBranch}"
       MaxSessionDuration: 3600
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Principal:
-              Federated: !If
-                - CreateOIDC
-                - !Ref GitHubOIDCProvider
-                - !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+              Federated: !Ref GitHubOIDCProvider
             Action: sts:AssumeRoleWithWebIdentity
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
-                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:${GitHubRef}"
-      Description: "Role assumed directly by GitHub Actions (OIDC) from repo ${GitHubOrg}/${GitHubRepo}"
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:${GitHubBranch}"
       Policies:
-        - PolicyName: gha-cfn-ecr-lambda
+        - PolicyName: gha-ecr-lambda
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # --- CloudFormation core operations in THIS account ---
-              - Sid: CloudFormationCore
+
+              # --- ECR: authenticate (must be Resource "*") ---
+              - Sid: EcrAuth
                 Effect: Allow
                 Action:
-                  - cloudformation:CreateStack
-                  - cloudformation:UpdateStack
-                  - cloudformation:DeleteStack
-                  - cloudformation:CreateChangeSet
-                  - cloudformation:ExecuteChangeSet
-                  - cloudformation:Describe*
-                  - cloudformation:GetTemplate*
-                  - cloudformation:List*
+                  - ecr:GetAuthorizationToken
                 Resource: "*"
 
-              # (Optional) Pass ONLY the designated CFN execution role
-              - Sid: PassOnlyCfnExecRole
-                Effect: Allow
-                Action: iam:PassRole
-                Resource: !If [HasCfnExecRole, !Ref CfnExecutionRoleArn, !Ref "AWS::NoValue"]
-
-              # --- S3: artifacts bucket (optional) ---
-              - Sid: ArtifactBucketAccess
-                Effect: Allow
-                Action:
-                  - s3:PutObject
-                  - s3:GetObject
-                  - s3:DeleteObject
-                  - s3:ListBucket
-                Resource: !If
-                  - HasArtifacts
-                  - [ !Ref ArtifactBucketArn, !Sub "${ArtifactBucketArn}/*" ]
-                  - [ !Ref "AWS::NoValue" ]
-
-              # --- ECR: push/pull to ANY repo in THIS account ---
+              # --- ECR: push/pull to a single repo (named after your GitHub repo) ---
               - Sid: EcrRepoScoped
                 Effect: Allow
                 Action:
@@ -136,18 +76,17 @@ Resources:
                   - ecr:BatchGetImage
                   - ecr:DescribeImages
                   - ecr:ListImages
-                Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/*
+                  - ecr:GetDownloadUrlForLayer
+                Resource: !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${GitHubRepo}"
 
-              # ECR account-level actions
-              - Sid: EcrAccountWide
+              # --- Lambda: CREATE function (requires iam:PassRole; CreateFunction is not resource-scoped) ---
+              - Sid: LambdaCreateFunction
                 Effect: Allow
                 Action:
-                  - ecr:GetAuthorizationToken
-                  - ecr:DescribeRepositories
-                  - ecr:CreateRepository
+                  - lambda:CreateFunction
                 Resource: "*"
 
-              # --- Lambda: update container image code (optionally scoped by name prefix) ---
+              # --- Lambda: update image-based functions (scoped by name prefix) ---
               - Sid: LambdaUpdate
                 Effect: Allow
                 Action:
@@ -157,10 +96,34 @@ Resources:
                   - lambda:GetFunctionConfiguration
                   - lambda:UpdateAlias
                   - lambda:CreateAlias
-                Resource: !If
-                  - RestrictLambda
-                  - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaFunctionNamePrefix}*
-                  - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${GitHubRepo}"
+
+              # --- Lambda Function URL: create/manage URL + invoke policy on your functions ---
+              - Sid: LambdaFunctionUrlAdmin
+                Effect: Allow
+                Action:
+                  - lambda:CreateFunctionUrlConfig
+                  - lambda:GetFunctionUrlConfig
+                  - lambda:UpdateFunctionUrlConfig
+                  - lambda:DeleteFunctionUrlConfig
+                  - lambda:AddPermission        # to allow InvokeFunctionUrl
+                  - lambda:RemovePermission
+                  - lambda:TagResource
+                  - lambda:UntagResource
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${GitHubRepo}"
+
+              # --- Pass only the explicitly provided Lambda execution role ---
+              - Sid: PassRoleToLambda
+                Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !Ref LambdaExecutionRoleArn
+                Condition:
+                  StringEquals:
+                    "iam:PassedToService": "lambda.amazonaws.com"
+
 
 Outputs:
   GitHubActionsRoleArn:

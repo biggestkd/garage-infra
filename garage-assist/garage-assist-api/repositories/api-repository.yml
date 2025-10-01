@@ -14,7 +14,7 @@ Resources:
       RepositoryName: !Sub ${AppName}
       ImageScanningConfiguration:
         ScanOnPush: false # Enable to check images for CVEs - also increases costs
-      ImageTagMutability: IMMUTABLE # Disable image overwrites with latest tag
+      ImageTagMutability: IMMUTABLE # Disable to use latest tag
       EncryptionConfiguration:
         EncryptionType: AES256
       LifecyclePolicy:
